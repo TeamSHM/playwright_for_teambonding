@@ -1,10 +1,16 @@
+import { spawn } from 'node:child_process';
+import { resolve } from 'node:path';
 import { chromium } from 'playwright';
 
 const URL = 'https://10fastfingers.com/typing-test/english';
-const WPM = Number(process.env.WPM ?? 130);      // 1 word = 5 keystrokes
+const WPM = Number(process.env.WPM ?? 150);      // 1 word = 5 keystrokes
 const KEY_DELAY_MS = 60000 / (WPM * 5);
 const TEST_DURATION_MS = 62_000;                  // 1-minute test plus a little slack
-const PROFILE_DIR = './.chrome-profile';           // separate Chrome profile, keeps your login between runs
+const CHROME_PATH = process.env.CHROME_PATH ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+const PROFILE_DIR = resolve(process.env.CHROME_PROFILE_DIR ?? './.chrome-profile');
+const DEBUG_PORT = Number(process.env.DEBUG_PORT ?? 9222);
+const CDP_URL = `http://127.0.0.1:${DEBUG_PORT}`;
+const CHROME_STARTUP_TIMEOUT_MS = 15_000;
 
 const WORDS = '[data-testid="word-box-words"]';
 const INPUT = '[data-testid="Typing-box-input"]';
@@ -86,16 +92,37 @@ const pressGuarded = async (page, ch) => {
   if (remainingDelay > 0) await page.waitForTimeout(remainingDelay);
 };
 
+const isChromeListening = () =>
+  fetch(`${CDP_URL}/json/version`).then((res) => res.ok, () => false);
+
+// Start a plain Chrome (no Playwright flags, so extensions load normally) with
+// remote debugging on, or reuse one already running on DEBUG_PORT.
+const ensureChrome = async () => {
+  if (await isChromeListening()) return;
+
+  const chrome = spawn(CHROME_PATH, [
+    `--remote-debugging-port=${DEBUG_PORT}`,
+    `--user-data-dir=${PROFILE_DIR}`,
+    '--no-first-run',
+    '--no-default-browser-check',
+  ], { detached: true, stdio: 'ignore' });
+  chrome.unref();                          // Chrome keeps running after this script exits
+
+  const deadline = Date.now() + CHROME_STARTUP_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (await isChromeListening()) return;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  throw new Error(`Chrome did not open debugging port ${DEBUG_PORT} within ${CHROME_STARTUP_TIMEOUT_MS / 1000}s`);
+};
+
 const main = async () => {
-  const context = await chromium.launchPersistentContext(PROFILE_DIR, {
-    channel: 'chrome',                         // your installed Google Chrome, not bundled Chromium
-    headless: false,
-    viewport: null,                            // use the real window size
-    ignoreDefaultArgs: ['--enable-automation'], // hide the "controlled by automated software" bar
-  });
+  await ensureChrome();
+  const browser = await chromium.connectOverCDP(CDP_URL);
+  const context = browser.contexts()[0];
   await context.addInitScript(installKeyGuard);
 
-  const page = context.pages()[0] ?? (await context.newPage());
+  const page = await context.newPage();
   await page.goto(URL, { waitUntil: 'domcontentloaded' });
   await dismissCookieBanner(page);
 
@@ -124,7 +151,8 @@ const main = async () => {
     await setGuard(page, false).catch(() => {});
   }
 
-  console.log(`Finished, typed ${typedWords} words. Keyboard unblocked; browser stays open, press Ctrl+C to quit.`);
+  console.log(`Finished, typed ${typedWords} words. Keyboard unblocked; Chrome stays open.`);
+  await browser.close();                   // only disconnects; the Chrome window keeps running
 };
 
 main().catch((err) => {
