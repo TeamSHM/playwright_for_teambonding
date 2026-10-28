@@ -1,3 +1,6 @@
 node_modules/
 .browser-profile/
 .DS_Store
+.chrome-profile/
+.idea
+
