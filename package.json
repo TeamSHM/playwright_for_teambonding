@@ -1,0 +1,11 @@
+{
+  "name": "typing-bot",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node typing-test.mjs"
+  },
+  "dependencies": {
+    "playwright": "^1.48.0"
+  }
+}
